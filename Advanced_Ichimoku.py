@@ -1,138 +1,337 @@
-from freqtrade.strategy.interface import IStrategy
-from pandas import DataFrame
+from freqtrade.strategy import IStrategy, CategoricalParameter, IntParameter, merge_informative_pair
+from freqtrade.enums import SignalType
+from pandas import DataFrame, Series
+
 import talib.abstract as ta
 import freqtrade.vendor.qtpylib.indicators as qtpylib
-import pandas as pd  # noqa
-pd.options.mode.chained_assignment = None  # default='warn'
-import technical.indicators as ftt
 from functools import reduce
-from datetime import datetime, timedelta
-from freqtrade.strategy import merge_informative_pair
 import numpy as np
-from freqtrade.strategy import stoploss_from_open
+
+########################### Static Parameters ###########################
+IS_HYPEROPT = True
+INDICATORS = ("EMA", "SMA")
+
+# Timeframes available for the exchange `Binance`: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+BASE_TIMEFRAME = "5m"
+
+BUY_TIMEFRAMES = ("5m", "15m", "1h", "1d")
+BUY_MAX_CONDITIONS = len(BUY_TIMEFRAMES)
+
+SELL_TIMEFRAMES = ("5m", "15m", "1h", "1d")
+SELL_MAX_CONDITIONS = len(SELL_TIMEFRAMES)
+
+INFO_TIMEFRAMES = set(BUY_TIMEFRAMES + SELL_TIMEFRAMES) - {"5m"}
+
+BTC_TIMEFRAMES = ("1h", "1d")
+
+PERIODS = []
+n = 5
+for i in range(1, 15):
+    PERIODS.append(n)
+    n += i
+PERIODS_LEN = len(PERIODS)
 
 
-class AdvancedIchimokuStrategy(IStrategy):
+########################### Default hyperopt parameter ###########################
+# Buy hyperspace params:
+buy_params = {
+    "buy_fperiod_0": 6,
+    "buy_fperiod_1": 11,
+    "buy_fperiod_2": 9,
+    "buy_fperiod_3": 10,
+    "buy_indicator_0": "EMA",
+    "buy_indicator_1": "EMA",
+    "buy_indicator_2": "SMA",
+    "buy_indicator_3": "SMA",
+    "buy_speriod_0": 9,
+    "buy_speriod_1": 10,
+    "buy_speriod_2": 12,
+    "buy_speriod_3": 13,
+}
 
-    # Define your parameters for the strategy here
-    buy_params = {
-        "buy_trend_above_senkou_level": 1,
-        "buy_trend_bullish_level": 6,
-        "buy_fan_magnitude_shift_value": 3,
-        "buy_min_fan_magnitude_gain": 1.002
-    }
+# Sell hyperspace params:
+sell_params = {
+    "sell_fperiod_0": 9,
+    "sell_fperiod_1": 1,
+    "sell_fperiod_2": 3,
+    "sell_fperiod_3": 7,
+    "sell_indicator_0": "EMA",
+    "sell_indicator_1": "EMA",
+    "sell_indicator_2": "SMA",
+    "sell_indicator_3": "EMA",
+    "sell_speriod_0": 13,
+    "sell_speriod_1": 13,
+    "sell_speriod_2": 5,
+    "sell_speriod_3": 1,
+}
 
-    sell_params = {
-        "sell_trend_indicator": "trend_close_2h",
-    }
+########################### Indicator ###########################
+def normalize(df):
+    df = (df - df.min()) / (df.max() - df.min())
+    return df
 
-    minimal_roi = {
-        "0": 0.059,
-        "10": 0.037,
-        "41": 0.012,
-        "114": 0
-    }
 
-    stoploss = -0.275
+def apply_indicator(dataframe: DataFrame, key: str, indicator: str, period: int):
+    if key in dataframe.keys():
+        return
 
-    timeframe = '5m'
+    result = getattr(ta, indicator)(dataframe, timeperiod=period)
+    # dataframe[key] = normalize(result)
+    dataframe[key] = result
 
-    startup_candle_count = 96
-    process_only_new_candles = False
 
+########################### Operators ###########################
+def greater_operator(dataframe: DataFrame, main_indicator: str, crossed_indicator: str):
+    return dataframe[main_indicator] > dataframe[crossed_indicator]
+
+
+def lower_operator(dataframe: DataFrame, main_indicator: str, crossed_indicator: str):
+    return dataframe[main_indicator] < dataframe[crossed_indicator]
+
+
+def true_operator(dataframe: DataFrame, main_indicator: str, crossed_indicator: str):
+    return dataframe["volume"] > 10
+
+
+def close_operator(dataframe: DataFrame, main_indicator: str, crossed_indicator: str):
+    return np.isclose(dataframe[main_indicator], dataframe[crossed_indicator])
+
+
+def crossed_operator(dataframe: DataFrame, main_indicator: str, crossed_indicator: str):
+    return (qtpylib.crossed_below(dataframe[main_indicator], dataframe[crossed_indicator])) | (
+        qtpylib.crossed_above(dataframe[main_indicator], dataframe[crossed_indicator])
+    )
+
+
+def crossed_above_operator(dataframe: DataFrame, main_indicator: str, crossed_indicator: str):
+    return qtpylib.crossed_above(dataframe[main_indicator], dataframe[crossed_indicator])
+
+
+def crossed_below_operator(dataframe: DataFrame, main_indicator: str, crossed_indicator: str):
+    return qtpylib.crossed_below(dataframe[main_indicator], dataframe[crossed_indicator])
+
+
+OPERATORS = {
+    "D": true_operator,
+    ">": greater_operator,
+    "<": lower_operator,
+    "=": close_operator,
+    "C": crossed_operator,
+    "CA": crossed_above_operator,
+    "CB": crossed_below_operator,
+}
+
+
+def apply_operator(dataframe: DataFrame, main_indicator, crossed_indicator, operator) -> tuple[Series, DataFrame]:
+    condition = OPERATORS[operator](dataframe, main_indicator, crossed_indicator)
+    return condition, dataframe
+
+
+########################### HyperOpt Parameters ###########################
+
+
+class DefaultValue:
+    def __init__(self, value) -> None:
+        self.value = value
+
+
+def get_hyperopt_parameter_keys(trend: str, condition_idx: int):
+    k_1 = f"{trend}_indicator_{condition_idx}"
+    k_2 = f"{trend}_fperiod_{condition_idx}"
+    k_3 = f"{trend}_speriod_{condition_idx}"
+    return k_1, k_2, k_3
+
+
+def set_hyperopt_parameters(self):
+    trend = "buy"
+    for condition_idx in range(BUY_MAX_CONDITIONS):
+        k_1, k_2, k_3 = get_hyperopt_parameter_keys(trend, condition_idx)
+        if IS_HYPEROPT:
+            setattr(self, k_1, CategoricalParameter(INDICATORS, space=trend, default=buy_params[k_1]))
+            setattr(self, k_2, IntParameter(0, PERIODS_LEN - 1, space=trend, default=buy_params[k_2]))
+            setattr(self, k_3, IntParameter(0, PERIODS_LEN - 1, space=trend, default=buy_params[k_3]))
+        else:
+            setattr(self, k_1, DefaultValue(buy_params[k_1]))
+            setattr(self, k_2, DefaultValue(buy_params[k_2]))
+            setattr(self, k_3, DefaultValue(buy_params[k_3]))
+
+    trend = "sell"
+    for condition_idx in range(SELL_MAX_CONDITIONS):
+        k_1, k_2, k_3 = get_hyperopt_parameter_keys(trend, condition_idx)
+        if IS_HYPEROPT:
+            setattr(self, k_1, CategoricalParameter(INDICATORS, space=trend, default=sell_params[k_1]))
+            setattr(self, k_2, IntParameter(0, PERIODS_LEN - 1, space=trend, default=sell_params[k_2]))
+            setattr(self, k_3, IntParameter(0, PERIODS_LEN - 1, space=trend, default=sell_params[k_3]))
+        else:
+            setattr(self, k_1, DefaultValue(sell_params[k_1]))
+            setattr(self, k_2, DefaultValue(sell_params[k_2]))
+            setattr(self, k_3, DefaultValue(sell_params[k_3]))
+
+    return self
+
+
+########################### Strategy ###########################
+@set_hyperopt_parameters
+class BelieveInCoin(IStrategy):
+    def leverage(self, pair: str, current_time, current_rate: float, proposed_leverage: float, max_leverage: float, side: str, **kwargs) -> float:
+        return 5.0
+
+    INTERFACE_VERSION = 3
+
+    # ROI table:
+    minimal_roi = {"0": 100.0}
+
+    # Trailing stop:
+    trailing_stop = False
+    trailing_stop_positive = 0.03
+    trailing_stop_positive_offset = 0.05
+    trailing_only_offset_is_reached = False
+
+    # Stoploss
+    stoploss = -0.99
+
+    # Timeframe
+    timeframe = BASE_TIMEFRAME
+
+    # Run "populate_indicators()" only for new candle.
+    process_only_new_candles = True
+
+    # These values can be overridden in the "ask_strategy" section in the config.
     use_sell_signal = True
     sell_profit_only = False
-    ignore_roi_if_buy_signal = False
+    ignore_roi_if_buy_signal = True
 
-    leverage = 10  # Define the leverage
+    # Number of candles the strategy requires before producing valid signals
+    startup_candle_count = 500
 
+    def __init__(self, config: dict) -> None:
+        super().__init__(config)
+        print("Self:", self.__dict__)
 
-    def position_size(self, dataframe: DataFrame, metadata: dict) -> float:
-        if self.leverage > 0:
-            return self.capital / self.leverage / dataframe['close']
+    ########################### Populate Indicators ###########################
+    def drop_timeframe_data(self, dataframe: DataFrame, timeframe: str) -> DataFrame:
+        drop_columns = [f"{s}_{timeframe}" for s in ["date", "open", "high", "low", "close", "volume"]]
+        dataframe.drop(columns=dataframe.columns.intersection(drop_columns), inplace=True)
+        return dataframe
 
-        return super().position_size(dataframe, metadata)    
+    def info_tf_btc_indicators(self, dataframe: DataFrame) -> DataFrame:
+        dataframe["btc_rsi_14"] = ta.RSI(dataframe, timeperiod=14)
+        dataframe["btc_not_downtrend"] = (dataframe["close"] > dataframe["close"].shift(2)) | (dataframe["btc_rsi_14"] > 50)
 
+        return dataframe
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Ichimoku Cloud calculation
-        ichimoku = ftt.ichimoku(dataframe, conversion_line_period=20, base_line_periods=60, lagging_span=120, displacement=30)
-        dataframe['chikou_span'] = ichimoku['chikou_span']
-        dataframe['tenkan_sen'] = ichimoku['tenkan_sen']
-        dataframe['kijun_sen'] = ichimoku['kijun_sen']
-        dataframe['senkou_a'] = ichimoku['senkou_span_a']
-        dataframe['senkou_b'] = ichimoku['senkou_span_b']
-        dataframe['leading_senkou_span_a'] = ichimoku['leading_senkou_span_a']
-        dataframe['leading_senkou_span_b'] = ichimoku['leading_senkou_span_b']
-        dataframe['cloud_green'] = ichimoku['cloud_green']
-        dataframe['cloud_red'] = ichimoku['cloud_red']
+        # BTC informative (1h)
+        btc_info_pair = "BTC/USDT"
+        for btc_timeframe in BTC_TIMEFRAMES:  # btc_not_downtrend_1h, btc_not_downtrend_1d
+            btc_info_tf = self.dp.get_pair_dataframe(btc_info_pair, btc_timeframe)
+            btc_info_tf = self.info_tf_btc_indicators(btc_info_tf)
+            dataframe = merge_informative_pair(dataframe, btc_info_tf, self.timeframe, btc_timeframe, ffill=True)
+            dataframe = self.drop_timeframe_data(dataframe, btc_timeframe)
 
-        # Calculate additional indicators
-        dataframe['rsi'] = ta.RSI(dataframe['close'], timeperiod=14)
-        dataframe['macd'], _, _ = ta.MACD(dataframe['close'], fastperiod=12, slowperiod=26, signalperiod=9)
-        dataframe['ema5'] = ta.EMA(dataframe['close'], timeperiod=5)
-        dataframe['ema10'] = ta.EMA(dataframe['close'], timeperiod=10)
+        # Get available parameters
+        available_indicators = set()
+        available_info_timeframes = set()
+        available_periods = set()
 
-        # Higher timeframe analysis (1h, 4h, 8h)
-        # Example: 1h EMA
-        dataframe['trend_1h_ema'] = ta.EMA(dataframe['close'], timeperiod=12, open=dataframe['open'], high=dataframe['high'], low=dataframe['low'])
+        run_mode = self.dp.runmode.value
+        if run_mode in ("backtest", "live", "dry_run"):  # for these run mode shoud add only available parameters
+            for condition_idx in range(BUY_MAX_CONDITIONS):
+                indicator, fperiod, speriod = self.get_hyperopt_parameters("buy", condition_idx)
+                available_indicators.add(indicator)
+                available_info_timeframes.add(BUY_TIMEFRAMES[condition_idx])
+                available_periods.add(PERIODS[fperiod])
+                available_periods.add(PERIODS[speriod])
+            for condition_idx in range(SELL_MAX_CONDITIONS):
+                indicator, fperiod, speriod = self.get_hyperopt_parameters("sell", condition_idx)
+                available_indicators.add(indicator)
+                available_info_timeframes.add(SELL_TIMEFRAMES[condition_idx])
+                available_periods.add(PERIODS[fperiod])
+                available_periods.add(PERIODS[speriod])
+        else:
+            available_indicators = INDICATORS
+            available_info_timeframes = INFO_TIMEFRAMES
+            available_periods = PERIODS
 
-        # Support and resistance identification using Fibonacci retracements
-        # Example: Calculate Fibonacci retracement levels for support and resistance
-        high_price = dataframe['high'].max()
-        low_price = dataframe['low'].min()
-        fibonacci_levels = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1]
+        # apply info timeframe indicator
+        for info_timeframe in available_info_timeframes:
+            info_dataframe = self.dp.get_pair_dataframe(pair=metadata["pair"], timeframe=info_timeframe, candle_type="futures")
+            for indicator in available_indicators:
+                for period in available_periods:
+                    apply_indicator(info_dataframe, f"{indicator}_{period}", indicator, period)
+            dataframe = merge_informative_pair(dataframe, info_dataframe, self.timeframe, info_timeframe, ffill=True)
 
-        # Calculate Fibonacci levels
-        for level in fibonacci_levels:
-            retracement = low_price + (level * (high_price - low_price))
-            dataframe[f'fib_level_{level}'] = retracement
+        # apply base timeframe indicator
+        for indicator in available_indicators:
+            for period in available_periods:
+                apply_indicator(dataframe, f"{indicator}_{period}_{BASE_TIMEFRAME}", indicator, period)
 
-        # ... Implement other indicators and analysis as per your strategy requirements
+        # print(list(dataframe.keys()))
+
+        return dataframe
+
+    ########################### Strategy Logic ###########################
+    def get_hyperopt_parameters(self, trend: str, condition_idx: int):
+        k_1, k_2, k_3 = get_hyperopt_parameter_keys(trend, condition_idx)
+        indicator = getattr(self, k_1).value
+        fperiod = getattr(self, k_2).value
+        speriod = getattr(self, k_3).value
+        return indicator, fperiod, speriod
+
+    def get_indicators_pair(self, trend: str, condition_idx: int) -> tuple[str, str, str]:
+        indicator, fperiod, speriod = self.get_hyperopt_parameters(trend, condition_idx)
+
+        if fperiod == speriod:
+            return None, None, None
+
+        if trend == "sell":
+            operator = "CB" if condition_idx == 0 else "<"
+            main_indicator = f"{indicator}_{PERIODS[fperiod]}_{SELL_TIMEFRAMES[condition_idx]}"
+            crossed_indicator = f"{indicator}_{PERIODS[speriod]}_{SELL_TIMEFRAMES[condition_idx]}"
+        else:
+            operator = "CA" if condition_idx == 0 else ">"
+            main_indicator = f"{indicator}_{PERIODS[fperiod]}_{BUY_TIMEFRAMES[condition_idx]}"
+            crossed_indicator = f"{indicator}_{PERIODS[speriod]}_{BUY_TIMEFRAMES[condition_idx]}"
+
+        return main_indicator, crossed_indicator, operator
+
+    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        trend = "buy"
+        conditions = list()
+
+        # BTC Condition TODO: Add crsi_1h
+        for btc_timframe in BTC_TIMEFRAMES:
+            conditions.append(dataframe[f"btc_not_downtrend_{btc_timframe}"] == True)
+
+        for condition_idx in range(BUY_MAX_CONDITIONS):
+            main_indicator, crossed_indicator, operator = self.get_indicators_pair(trend, condition_idx)
+            if not operator:
+                continue
+            condition, dataframe = apply_operator(dataframe, main_indicator, crossed_indicator, operator)
+            conditions.append(condition)
+
+        if conditions:
+            dataframe.loc[:, SignalType.ENTER_LONG.value] = reduce(lambda x, y: x & y, conditions)
 
         return dataframe
 
-    def populate_buy_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Define buy conditions based on convergence of multiple indicators
+    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        trend = "sell"
+        conditions = list()
 
-        # EMA5 and EMA10 crossovers
-        dataframe['ema5_prev'] = dataframe['ema5'].shift(1)
-        dataframe['ema10_prev'] = dataframe['ema10'].shift(1)
-        dataframe['ema_crossover_buy'] = (dataframe['ema5_prev'] < dataframe['ema10_prev']) & (dataframe['ema5'] > dataframe['ema10'])
+        # BTC Condition TODO: Add crsi_1h
+        for btc_timframe in BTC_TIMEFRAMES:
+            conditions.append(dataframe[f"btc_not_downtrend_{btc_timframe}"] == False)
 
-        # Support and resistance conditions using Fibonacci retracements
-        dataframe['fib_support_resistance_buy'] = (dataframe['close'] > dataframe['fib_level_0.618'])  # Example condition for support
+        for condition_idx in range(BUY_MAX_CONDITIONS):
+            main_indicator, crossed_indicator, operator = self.get_indicators_pair(trend, condition_idx)
+            if not operator:
+                continue
+            if operator:
+                condition, dataframe = apply_operator(dataframe, main_indicator, crossed_indicator, operator)
+                conditions.append(condition)
 
-        # Higher timeframe confirmation (1h) - uptrend confirmation
-        dataframe['1h_trend_close_1h'] = ta.EMA(dataframe['close'], timeperiod=12, open=dataframe['open'], high=dataframe['high'], low=dataframe['low'])
-        dataframe['higher_timeframe_confirmation'] = (dataframe['trend_1h_ema'] < dataframe['1h_trend_close_1h'])
-
-        # Trigger based on higher timeframe confirmation, execute on lower timeframe
-        dataframe['buy_signal'] = (dataframe['ema_crossover_buy'] & dataframe['fib_support_resistance_buy'] & dataframe['higher_timeframe_confirmation'])
-
-        # Execute buy on lower timeframe
-        dataframe.loc[dataframe['buy_signal'], 'buy'] = 1
-
-        return dataframe
-    def populate_sell_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Define sell conditions using opposite logic of buy conditions
-
-        # EMA5 and EMA10 crossovers
-        dataframe['ema5_prev'] = dataframe['ema5'].shift(1)
-        dataframe['ema10_prev'] = dataframe['ema10'].shift(1)
-        dataframe['ema_crossover_sell'] = (dataframe['ema5_prev'] > dataframe['ema10_prev']) & (dataframe['ema5'] < dataframe['ema10'])
-
-        # Support and resistance conditions using Fibonacci retracements (opposite logic)
-        dataframe['fib_support_resistance_sell'] = (dataframe['close'] < dataframe['fib_level_0.618'])  # Example condition for resistance
-
-        # Higher timeframe confirmation (1h) - downtrend confirmation
-        dataframe['1h_trend_close_1h'] = ta.EMA(dataframe['close'], timeperiod=12, open=dataframe['open'], high=dataframe['high'], low=dataframe['low'])
-        dataframe['higher_timeframe_confirmation'] = (dataframe['trend_1h_ema'] > dataframe['1h_trend_close_1h'])
-
-        # Trigger based on higher timeframe confirmation, execute on lower timeframe
-        dataframe['sell_signal'] = (dataframe['ema_crossover_sell'] & dataframe['fib_support_resistance_sell'] & dataframe['higher_timeframe_confirmation'])
-
-        # Execute sell on lower timeframe
-        dataframe.loc[dataframe['sell_signal'], 'sell'] = 1
+        if conditions:
+            dataframe.loc[:, SignalType.EXIT_LONG.value] = reduce(lambda x, y: x & y, conditions)
 
         return dataframe
