@@ -1,3 +1,4 @@
+# --- Do not remove these libs ---
 from freqtrade.strategy.interface import IStrategy
 from pandas import DataFrame
 import talib.abstract as ta
@@ -12,20 +13,25 @@ import numpy as np
 from freqtrade.strategy import stoploss_from_open
 
 
-class AdvancedIchimokuStrategy(IStrategy):
+class ichiV1(IStrategy):
 
-    # Define your parameters for the strategy here
+    # NOTE: settings as of the 25th july 21
+    # Buy hyperspace params:
     buy_params = {
         "buy_trend_above_senkou_level": 1,
         "buy_trend_bullish_level": 6,
         "buy_fan_magnitude_shift_value": 3,
-        "buy_min_fan_magnitude_gain": 1.002
+        "buy_min_fan_magnitude_gain": 1.002 # NOTE: Good value (Win% ~70%), alot of trades
+        #"buy_min_fan_magnitude_gain": 1.008 # NOTE: Very save value (Win% ~90%), only the biggest moves 1.008,
     }
 
+    # Sell hyperspace params:
+    # NOTE: was 15m but kept bailing out in dryrun
     sell_params = {
         "sell_trend_indicator": "trend_close_2h",
     }
 
+    # ROI table:
     minimal_roi = {
         "0": 0.059,
         "10": 0.037,
@@ -33,30 +39,84 @@ class AdvancedIchimokuStrategy(IStrategy):
         "114": 0
     }
 
+    # Stoploss:
     stoploss = -0.275
 
+    # Optimal timeframe for the strategy
     timeframe = '5m'
 
     startup_candle_count = 96
     process_only_new_candles = False
 
+    trailing_stop = False
+    #trailing_stop_positive = 0.002
+    #trailing_stop_positive_offset = 0.025
+    #trailing_only_offset_is_reached = True
+
     use_sell_signal = True
     sell_profit_only = False
     ignore_roi_if_buy_signal = False
 
-    leverage = 10  # Define the leverage
-
-
-    def position_size(self, dataframe: DataFrame, metadata: dict) -> float:
-        if self.leverage > 0:
-            return self.capital / self.leverage / dataframe['close']
-
-        return super().position_size(dataframe, metadata)    
-
+    plot_config = {
+        'main_plot': {
+            # fill area between senkou_a and senkou_b
+            'senkou_a': {
+                'color': 'green', #optional
+                'fill_to': 'senkou_b',
+                'fill_label': 'Ichimoku Cloud', #optional
+                'fill_color': 'rgba(255,76,46,0.2)', #optional
+            },
+            # plot senkou_b, too. Not only the area to it.
+            'senkou_b': {},
+            'trend_close_5m': {'color': '#FF5733'},
+            'trend_close_15m': {'color': '#FF8333'},
+            'trend_close_30m': {'color': '#FFB533'},
+            'trend_close_1h': {'color': '#FFE633'},
+            'trend_close_2h': {'color': '#E3FF33'},
+            'trend_close_4h': {'color': '#C4FF33'},
+            'trend_close_6h': {'color': '#61FF33'},
+            'trend_close_8h': {'color': '#33FF7D'}
+        },
+        'subplots': {
+            'fan_magnitude': {
+                'fan_magnitude': {}
+            },
+            'fan_magnitude_gain': {
+                'fan_magnitude_gain': {}
+            }
+        }
+    }
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Ichimoku Cloud calculation
-        ichimoku = ftt.ichimoku(dataframe, conversion_line_period=20, base_line_periods=60, lagging_span=120, displacement=30)
+
+        heikinashi = qtpylib.heikinashi(dataframe)
+        dataframe['open'] = heikinashi['open']
+        #dataframe['close'] = heikinashi['close']
+        dataframe['high'] = heikinashi['high']
+        dataframe['low'] = heikinashi['low']
+
+        dataframe['trend_close_5m'] = dataframe['close']
+        dataframe['trend_close_15m'] = ta.EMA(dataframe['close'], timeperiod=3)
+        dataframe['trend_close_30m'] = ta.EMA(dataframe['close'], timeperiod=6)
+        dataframe['trend_close_1h'] = ta.EMA(dataframe['close'], timeperiod=12)
+        dataframe['trend_close_2h'] = ta.EMA(dataframe['close'], timeperiod=24)
+        dataframe['trend_close_4h'] = ta.EMA(dataframe['close'], timeperiod=48)
+        dataframe['trend_close_6h'] = ta.EMA(dataframe['close'], timeperiod=72)
+        dataframe['trend_close_8h'] = ta.EMA(dataframe['close'], timeperiod=96)
+
+        dataframe['trend_open_5m'] = dataframe['open']
+        dataframe['trend_open_15m'] = ta.EMA(dataframe['open'], timeperiod=3)
+        dataframe['trend_open_30m'] = ta.EMA(dataframe['open'], timeperiod=6)
+        dataframe['trend_open_1h'] = ta.EMA(dataframe['open'], timeperiod=12)
+        dataframe['trend_open_2h'] = ta.EMA(dataframe['open'], timeperiod=24)
+        dataframe['trend_open_4h'] = ta.EMA(dataframe['open'], timeperiod=48)
+        dataframe['trend_open_6h'] = ta.EMA(dataframe['open'], timeperiod=72)
+        dataframe['trend_open_8h'] = ta.EMA(dataframe['open'], timeperiod=96)
+
+        dataframe['fan_magnitude'] = (dataframe['trend_close_1h'] / dataframe['trend_close_8h'])
+        dataframe['fan_magnitude_gain'] = dataframe['fan_magnitude'] / dataframe['fan_magnitude'].shift(1)
+
+        ichimoku = ftt.ichimoku(dataframe, conversion_line_period=20, base_line_periods=60, laggin_span=120, displacement=30)
         dataframe['chikou_span'] = ichimoku['chikou_span']
         dataframe['tenkan_sen'] = ichimoku['tenkan_sen']
         dataframe['kijun_sen'] = ichimoku['kijun_sen']
@@ -67,72 +127,97 @@ class AdvancedIchimokuStrategy(IStrategy):
         dataframe['cloud_green'] = ichimoku['cloud_green']
         dataframe['cloud_red'] = ichimoku['cloud_red']
 
-        # Calculate additional indicators
-        dataframe['rsi'] = ta.RSI(dataframe['close'], timeperiod=14)
-        dataframe['macd'], _, _ = ta.MACD(dataframe['close'], fastperiod=12, slowperiod=26, signalperiod=9)
-        dataframe['ema5'] = ta.EMA(dataframe['close'], timeperiod=5)
-        dataframe['ema10'] = ta.EMA(dataframe['close'], timeperiod=10)
-
-        # Higher timeframe analysis (1h, 4h, 8h)
-        # Example: 1h EMA
-        dataframe['trend_1h_ema'] = ta.EMA(dataframe['close'], timeperiod=12, open=dataframe['open'], high=dataframe['high'], low=dataframe['low'])
-
-        # Support and resistance identification using Fibonacci retracements
-        # Example: Calculate Fibonacci retracement levels for support and resistance
-        high_price = dataframe['high'].max()
-        low_price = dataframe['low'].min()
-        fibonacci_levels = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1]
-
-        # Calculate Fibonacci levels
-        for level in fibonacci_levels:
-            retracement = low_price + (level * (high_price - low_price))
-            dataframe[f'fib_level_{level}'] = retracement
-
-        # ... Implement other indicators and analysis as per your strategy requirements
+        dataframe['atr'] = ta.ATR(dataframe)
 
         return dataframe
+
 
     def populate_buy_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Define buy conditions based on convergence of multiple indicators
 
-        # EMA5 and EMA10 crossovers
-        dataframe['ema5_prev'] = dataframe['ema5'].shift(1)
-        dataframe['ema10_prev'] = dataframe['ema10'].shift(1)
-        dataframe['ema_crossover_buy'] = (dataframe['ema5_prev'] < dataframe['ema10_prev']) & (dataframe['ema5'] > dataframe['ema10'])
+        conditions = []
 
-        # Support and resistance conditions using Fibonacci retracements
-        dataframe['fib_support_resistance_buy'] = (dataframe['close'] > dataframe['fib_level_0.618'])  # Example condition for support
+        # Trending market
+        if self.buy_params['buy_trend_above_senkou_level'] >= 1:
+            conditions.append(dataframe['trend_close_5m'] > dataframe['senkou_a'])
+            conditions.append(dataframe['trend_close_5m'] > dataframe['senkou_b'])
 
-        # Higher timeframe confirmation (1h) - uptrend confirmation
-        dataframe['1h_trend_close_1h'] = ta.EMA(dataframe['close'], timeperiod=12, open=dataframe['open'], high=dataframe['high'], low=dataframe['low'])
-        dataframe['higher_timeframe_confirmation'] = (dataframe['trend_1h_ema'] < dataframe['1h_trend_close_1h'])
+        if self.buy_params['buy_trend_above_senkou_level'] >= 2:
+            conditions.append(dataframe['trend_close_15m'] > dataframe['senkou_a'])
+            conditions.append(dataframe['trend_close_15m'] > dataframe['senkou_b'])
 
-        # Trigger based on higher timeframe confirmation, execute on lower timeframe
-        dataframe['buy_signal'] = (dataframe['ema_crossover_buy'] & dataframe['fib_support_resistance_buy'] & dataframe['higher_timeframe_confirmation'])
+        if self.buy_params['buy_trend_above_senkou_level'] >= 3:
+            conditions.append(dataframe['trend_close_30m'] > dataframe['senkou_a'])
+            conditions.append(dataframe['trend_close_30m'] > dataframe['senkou_b'])
 
-        # Execute buy on lower timeframe
-        dataframe.loc[dataframe['buy_signal'], 'buy'] = 1
+        if self.buy_params['buy_trend_above_senkou_level'] >= 4:
+            conditions.append(dataframe['trend_close_1h'] > dataframe['senkou_a'])
+            conditions.append(dataframe['trend_close_1h'] > dataframe['senkou_b'])
+
+        if self.buy_params['buy_trend_above_senkou_level'] >= 5:
+            conditions.append(dataframe['trend_close_2h'] > dataframe['senkou_a'])
+            conditions.append(dataframe['trend_close_2h'] > dataframe['senkou_b'])
+
+        if self.buy_params['buy_trend_above_senkou_level'] >= 6:
+            conditions.append(dataframe['trend_close_4h'] > dataframe['senkou_a'])
+            conditions.append(dataframe['trend_close_4h'] > dataframe['senkou_b'])
+
+        if self.buy_params['buy_trend_above_senkou_level'] >= 7:
+            conditions.append(dataframe['trend_close_6h'] > dataframe['senkou_a'])
+            conditions.append(dataframe['trend_close_6h'] > dataframe['senkou_b'])
+
+        if self.buy_params['buy_trend_above_senkou_level'] >= 8:
+            conditions.append(dataframe['trend_close_8h'] > dataframe['senkou_a'])
+            conditions.append(dataframe['trend_close_8h'] > dataframe['senkou_b'])
+
+        # Trends bullish
+        if self.buy_params['buy_trend_bullish_level'] >= 1:
+            conditions.append(dataframe['trend_close_5m'] > dataframe['trend_open_5m'])
+
+        if self.buy_params['buy_trend_bullish_level'] >= 2:
+            conditions.append(dataframe['trend_close_15m'] > dataframe['trend_open_15m'])
+
+        if self.buy_params['buy_trend_bullish_level'] >= 3:
+            conditions.append(dataframe['trend_close_30m'] > dataframe['trend_open_30m'])
+
+        if self.buy_params['buy_trend_bullish_level'] >= 4:
+            conditions.append(dataframe['trend_close_1h'] > dataframe['trend_open_1h'])
+
+        if self.buy_params['buy_trend_bullish_level'] >= 5:
+            conditions.append(dataframe['trend_close_2h'] > dataframe['trend_open_2h'])
+
+        if self.buy_params['buy_trend_bullish_level'] >= 6:
+            conditions.append(dataframe['trend_close_4h'] > dataframe['trend_open_4h'])
+
+        if self.buy_params['buy_trend_bullish_level'] >= 7:
+            conditions.append(dataframe['trend_close_6h'] > dataframe['trend_open_6h'])
+
+        if self.buy_params['buy_trend_bullish_level'] >= 8:
+            conditions.append(dataframe['trend_close_8h'] > dataframe['trend_open_8h'])
+
+        # Trends magnitude
+        conditions.append(dataframe['fan_magnitude_gain'] >= self.buy_params['buy_min_fan_magnitude_gain'])
+        conditions.append(dataframe['fan_magnitude'] > 1)
+
+        for x in range(self.buy_params['buy_fan_magnitude_shift_value']):
+            conditions.append(dataframe['fan_magnitude'].shift(x+1) < dataframe['fan_magnitude'])
+
+        if conditions:
+            dataframe.loc[
+                reduce(lambda x, y: x & y, conditions),
+                'buy'] = 1
 
         return dataframe
+
+
     def populate_sell_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Define sell conditions using opposite logic of buy conditions
 
-        # EMA5 and EMA10 crossovers
-        dataframe['ema5_prev'] = dataframe['ema5'].shift(1)
-        dataframe['ema10_prev'] = dataframe['ema10'].shift(1)
-        dataframe['ema_crossover_sell'] = (dataframe['ema5_prev'] > dataframe['ema10_prev']) & (dataframe['ema5'] < dataframe['ema10'])
+        conditions = []
 
-        # Support and resistance conditions using Fibonacci retracements (opposite logic)
-        dataframe['fib_support_resistance_sell'] = (dataframe['close'] < dataframe['fib_level_0.618'])  # Example condition for resistance
+        conditions.append(qtpylib.crossed_below(dataframe['trend_close_5m'], dataframe[self.sell_params['sell_trend_indicator']]))
 
-        # Higher timeframe confirmation (1h) - downtrend confirmation
-        dataframe['1h_trend_close_1h'] = ta.EMA(dataframe['close'], timeperiod=12, open=dataframe['open'], high=dataframe['high'], low=dataframe['low'])
-        dataframe['higher_timeframe_confirmation'] = (dataframe['trend_1h_ema'] > dataframe['1h_trend_close_1h'])
-
-        # Trigger based on higher timeframe confirmation, execute on lower timeframe
-        dataframe['sell_signal'] = (dataframe['ema_crossover_sell'] & dataframe['fib_support_resistance_sell'] & dataframe['higher_timeframe_confirmation'])
-
-        # Execute sell on lower timeframe
-        dataframe.loc[dataframe['sell_signal'], 'sell'] = 1
+        if conditions:
+            dataframe.loc[
+                reduce(lambda x, y: x & y, conditions),
+                'sell'] = 1
 
         return dataframe
