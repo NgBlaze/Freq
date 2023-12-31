@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from freqtrade.strategy import merge_informative_pair
 import numpy as np
 from freqtrade.strategy import stoploss_from_open
+from typing import Optional
 
 
 class ichiV1(IStrategy):
