@@ -174,12 +174,16 @@ def set_hyperopt_parameters(self):
 @set_hyperopt_parameters
 class BelieveInCoin(IStrategy):
     def leverage(self, pair: str, current_time, current_rate: float, proposed_leverage: float, max_leverage: float, side: str, **kwargs) -> float:
-        return 5.0
+        return 25.0
 
     INTERFACE_VERSION = 3
 
     # ROI table:
-    minimal_roi = {"0": 100.0}
+    minimal_roi = {"0": 1.5,
+                   "30": 0.5,
+                   "50": 0.75,
+                   "60": 1,
+                   }
 
     # Trailing stop:
     trailing_stop = False
@@ -188,7 +192,7 @@ class BelieveInCoin(IStrategy):
     trailing_only_offset_is_reached = False
 
     # Stoploss
-    stoploss = -0.99
+    stoploss = -0.60
 
     # Timeframe
     timeframe = BASE_TIMEFRAME
