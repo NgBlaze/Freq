@@ -199,7 +199,7 @@ class BelieveInCoin(IStrategy):
     # These values can be overridden in the "ask_strategy" section in the config.
     use_exit_signal = True
     exit_profit_only = False
-    ignore_roi_if_buy_signal = True
+    ignore_roi_if_entry_signal = True
 
     # Number of candles the strategy requires before producing valid signals
     startup_candle_count = 500
