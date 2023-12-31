@@ -25,9 +25,6 @@ class E0V1E(IStrategy):
     order_types = {
         'entry': 'market',
         'exit': 'market',
-        'emergency_exit': 'market',
-        'force_entry': 'market',
-        'force_exit': "market",
         'stoploss': 'market',
         'stoploss_on_exchange': True,
         'stoploss_on_exchange_interval': 60,
@@ -104,15 +101,4 @@ class E0V1E(IStrategy):
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         dataframe.loc[(), ['exit_long', 'exit_tag']] = (0, 'long_out')
         return dataframe
-    def market_entry(self, pair: str, current_time: datetime, current_rate: float, trade_type: str, **kwargs) -> float:
-        # Implementing the fix for market entry orders
-        entry_pricing = self.dp.current_price(pair)  # Get current price
-        entry_pricing.price_side = "other"  # Set price side to "other" for market entry orders
-
-        return entry_pricing.price
-
-    def market_buy(self, pair: str, amount: float, rate: float, **kwargs) -> 'Trade':
-        return self.buy(pair, amount=amount, rate=rate)
-
-    def market_sell(self, pair: str, amount: float, rate: float, **kwargs) -> 'Trade':
-        return self.sell(pair, amount=amount, rate=rate)
+    
