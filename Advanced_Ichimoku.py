@@ -1,341 +1,106 @@
-from freqtrade.strategy import IStrategy, CategoricalParameter, IntParameter, merge_informative_pair
-from freqtrade.enums import SignalType
-from pandas import DataFrame, Series
-
+from datetime import datetime, timedelta
 import talib.abstract as ta
-import freqtrade.vendor.qtpylib.indicators as qtpylib
+import pandas_ta as pta
+from freqtrade.persistence import Trade
+from freqtrade.strategy.interface import IStrategy
+from pandas import DataFrame
+from freqtrade.strategy import DecimalParameter, IntParameter
 from functools import reduce
-import numpy as np
+import warnings
 
-########################### Static Parameters ###########################
-IS_HYPEROPT = True
-INDICATORS = ("EMA", "SMA")
-
-# Timeframes available for the exchange `Binance`: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
-BASE_TIMEFRAME = "5m"
-
-BUY_TIMEFRAMES = ("5m", "15m", "1h", "1d")
-BUY_MAX_CONDITIONS = len(BUY_TIMEFRAMES)
-
-SELL_TIMEFRAMES = ("5m", "15m", "1h", "1d")
-SELL_MAX_CONDITIONS = len(SELL_TIMEFRAMES)
-
-INFO_TIMEFRAMES = set(BUY_TIMEFRAMES + SELL_TIMEFRAMES) - {"5m"}
-
-BTC_TIMEFRAMES = ("1h", "1d")
-
-PERIODS = []
-n = 5
-for i in range(1, 15):
-    PERIODS.append(n)
-    n += i
-PERIODS_LEN = len(PERIODS)
+warnings.simplefilter(action="ignore", category=RuntimeWarning)
 
 
-########################### Default hyperopt parameter ###########################
-# Buy hyperspace params:
-buy_params = {
-    "buy_fperiod_0": 6,
-    "buy_fperiod_1": 11,
-    "buy_fperiod_2": 9,
-    "buy_fperiod_3": 10,
-    "buy_indicator_0": "EMA",
-    "buy_indicator_1": "EMA",
-    "buy_indicator_2": "SMA",
-    "buy_indicator_3": "SMA",
-    "buy_speriod_0": 9,
-    "buy_speriod_1": 10,
-    "buy_speriod_2": 12,
-    "buy_speriod_3": 13,
-}
+class E0V1E(IStrategy):
+    minimal_roi = {
+        "0": 1.5,
+        "30": 0.5,
+        "50": 0.75,
+        "60": 1
 
-# Sell hyperspace params:
-sell_params = {
-    "sell_fperiod_0": 9,
-    "sell_fperiod_1": 1,
-    "sell_fperiod_2": 3,
-    "sell_fperiod_3": 7,
-    "sell_indicator_0": "EMA",
-    "sell_indicator_1": "EMA",
-    "sell_indicator_2": "SMA",
-    "sell_indicator_3": "EMA",
-    "sell_speriod_0": 13,
-    "sell_speriod_1": 13,
-    "sell_speriod_2": 5,
-    "sell_speriod_3": 1,
-}
-
-########################### Indicator ###########################
-def normalize(df):
-    df = (df - df.min()) / (df.max() - df.min())
-    return df
-
-
-def apply_indicator(dataframe: DataFrame, key: str, indicator: str, period: int):
-    if key in dataframe.keys():
-        return
-
-    result = getattr(ta, indicator)(dataframe, timeperiod=period)
-    # dataframe[key] = normalize(result)
-    dataframe[key] = result
-
-
-########################### Operators ###########################
-def greater_operator(dataframe: DataFrame, main_indicator: str, crossed_indicator: str):
-    return dataframe[main_indicator] > dataframe[crossed_indicator]
-
-
-def lower_operator(dataframe: DataFrame, main_indicator: str, crossed_indicator: str):
-    return dataframe[main_indicator] < dataframe[crossed_indicator]
-
-
-def true_operator(dataframe: DataFrame, main_indicator: str, crossed_indicator: str):
-    return dataframe["volume"] > 10
-
-
-def close_operator(dataframe: DataFrame, main_indicator: str, crossed_indicator: str):
-    return np.isclose(dataframe[main_indicator], dataframe[crossed_indicator])
-
-
-def crossed_operator(dataframe: DataFrame, main_indicator: str, crossed_indicator: str):
-    return (qtpylib.crossed_below(dataframe[main_indicator], dataframe[crossed_indicator])) | (
-        qtpylib.crossed_above(dataframe[main_indicator], dataframe[crossed_indicator])
-    )
-
-
-def crossed_above_operator(dataframe: DataFrame, main_indicator: str, crossed_indicator: str):
-    return qtpylib.crossed_above(dataframe[main_indicator], dataframe[crossed_indicator])
-
-
-def crossed_below_operator(dataframe: DataFrame, main_indicator: str, crossed_indicator: str):
-    return qtpylib.crossed_below(dataframe[main_indicator], dataframe[crossed_indicator])
-
-
-OPERATORS = {
-    "D": true_operator,
-    ">": greater_operator,
-    "<": lower_operator,
-    "=": close_operator,
-    "C": crossed_operator,
-    "CA": crossed_above_operator,
-    "CB": crossed_below_operator,
-}
-
-
-def apply_operator(dataframe: DataFrame, main_indicator, crossed_indicator, operator) -> tuple[Series, DataFrame]:
-    condition = OPERATORS[operator](dataframe, main_indicator, crossed_indicator)
-    return condition, dataframe
-
-
-########################### HyperOpt Parameters ###########################
-
-
-class DefaultValue:
-    def __init__(self, value) -> None:
-        self.value = value
-
-
-def get_hyperopt_parameter_keys(trend: str, condition_idx: int):
-    k_1 = f"{trend}_indicator_{condition_idx}"
-    k_2 = f"{trend}_fperiod_{condition_idx}"
-    k_3 = f"{trend}_speriod_{condition_idx}"
-    return k_1, k_2, k_3
-
-
-def set_hyperopt_parameters(self):
-    trend = "buy"
-    for condition_idx in range(BUY_MAX_CONDITIONS):
-        k_1, k_2, k_3 = get_hyperopt_parameter_keys(trend, condition_idx)
-        if IS_HYPEROPT:
-            setattr(self, k_1, CategoricalParameter(INDICATORS, space=trend, default=buy_params[k_1]))
-            setattr(self, k_2, IntParameter(0, PERIODS_LEN - 1, space=trend, default=buy_params[k_2]))
-            setattr(self, k_3, IntParameter(0, PERIODS_LEN - 1, space=trend, default=buy_params[k_3]))
-        else:
-            setattr(self, k_1, DefaultValue(buy_params[k_1]))
-            setattr(self, k_2, DefaultValue(buy_params[k_2]))
-            setattr(self, k_3, DefaultValue(buy_params[k_3]))
-
-    trend = "sell"
-    for condition_idx in range(SELL_MAX_CONDITIONS):
-        k_1, k_2, k_3 = get_hyperopt_parameter_keys(trend, condition_idx)
-        if IS_HYPEROPT:
-            setattr(self, k_1, CategoricalParameter(INDICATORS, space=trend, default=sell_params[k_1]))
-            setattr(self, k_2, IntParameter(0, PERIODS_LEN - 1, space=trend, default=sell_params[k_2]))
-            setattr(self, k_3, IntParameter(0, PERIODS_LEN - 1, space=trend, default=sell_params[k_3]))
-        else:
-            setattr(self, k_1, DefaultValue(sell_params[k_1]))
-            setattr(self, k_2, DefaultValue(sell_params[k_2]))
-            setattr(self, k_3, DefaultValue(sell_params[k_3]))
-
-    return self
-
-
-########################### Strategy ###########################
-@set_hyperopt_parameters
-class BelieveInCoin(IStrategy):
-    def leverage(self, pair: str, current_time, current_rate: float, proposed_leverage: float, max_leverage: float, side: str, **kwargs) -> float:
-        return 25.0
-
-    INTERFACE_VERSION = 3
-
-    # ROI table:
-    minimal_roi = {"0": 1.5,
-                   "30": 0.5,
-                   "50": 0.75,
-                   "60": 1,
-                   }
-
-    # Trailing stop:
-    trailing_stop = False
-    trailing_stop_positive = 0.03
-    trailing_stop_positive_offset = 0.05
-    trailing_only_offset_is_reached = False
-
-    # Stoploss
-    stoploss = -0.60
-
-    # Timeframe
-    timeframe = BASE_TIMEFRAME
-
-    # Run "populate_indicators()" only for new candle.
+    }
+    timeframe = '5m'
     process_only_new_candles = True
+    startup_candle_count = 120
+    order_types = {
+        'entry': 'market',
+        'exit': 'market',
+        'emergency_exit': 'market',
+        'force_entry': 'market',
+        'force_exit': "market",
+        'stoploss': 'market',
+        'stoploss_on_exchange': True,
+        'stoploss_on_exchange_interval': 60,
+        'stoploss_on_exchange_market_ratio': 0.99
+    }
+    stoploss = -0.27
+    use_custom_stoploss = False
 
-    # These values can be overridden in the "ask_strategy" section in the config.
-    use_exit_signal = True
-    exit_profit_only = False
-    ignore_roi_if_entry_signal = True
-
-    # Number of candles the strategy requires before producing valid signals
-    startup_candle_count = 500
-
-    def __init__(self, config: dict) -> None:
-        super().__init__(config)
-        print("Self:", self.__dict__)
-
-    ########################### Populate Indicators ###########################
-    def drop_timeframe_data(self, dataframe: DataFrame, timeframe: str) -> DataFrame:
-        drop_columns = [f"{s}_{timeframe}" for s in ["date", "open", "high", "low", "close", "volume"]]
-        dataframe.drop(columns=dataframe.columns.intersection(drop_columns), inplace=True)
-        return dataframe
-
-    def info_tf_btc_indicators(self, dataframe: DataFrame) -> DataFrame:
-        dataframe["btc_rsi_14"] = ta.RSI(dataframe, timeperiod=14)
-        dataframe["btc_not_downtrend"] = (dataframe["close"] > dataframe["close"].shift(2)) | (dataframe["btc_rsi_14"] > 50)
-
-        return dataframe
+    is_optimize_32 = True
+    buy_rsi_fast_32 = IntParameter(20, 70, default=45, space='buy', optimize=is_optimize_32)
+    buy_rsi_32 = IntParameter(15, 50, default=35, space='buy', optimize=is_optimize_32)
+    buy_sma15_32 = DecimalParameter(0.900, 1, default=0.961, decimals=3, space='buy', optimize=is_optimize_32)
+    buy_cti_32 = DecimalParameter(-1, 0, default=-0.58, decimals=2, space='buy', optimize=is_optimize_32)
+    sell_fastx = IntParameter(50, 100, default=70, space='sell', optimize=True)
+    sell_loss_cci = IntParameter(low=0, high=600, default=148, space='sell', optimize=False)
+    sell_loss_cci_profit = DecimalParameter(-0.15, 0, default=-0.04, decimals=2, space='sell', optimize=False)
+    sell_cci = IntParameter(low=0, high=200, default=90, space='sell', optimize=False)
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # BTC informative (1h)
-        btc_info_pair = "BTC/USDT"
-        for btc_timeframe in BTC_TIMEFRAMES:  # btc_not_downtrend_1h, btc_not_downtrend_1d
-            btc_info_tf = self.dp.get_pair_dataframe(btc_info_pair, btc_timeframe)
-            btc_info_tf = self.info_tf_btc_indicators(btc_info_tf)
-            dataframe = merge_informative_pair(dataframe, btc_info_tf, self.timeframe, btc_timeframe, ffill=True)
-            dataframe = self.drop_timeframe_data(dataframe, btc_timeframe)
+        # buy_1 indicators
+        dataframe['sma_15'] = ta.SMA(dataframe, timeperiod=15)
+        dataframe['cti'] = pta.cti(dataframe["close"], length=20)
+        dataframe['rsi'] = ta.RSI(dataframe, timeperiod=14)
+        dataframe['rsi_fast'] = ta.RSI(dataframe, timeperiod=4)
+        dataframe['rsi_slow'] = ta.RSI(dataframe, timeperiod=20)
+        # profit sell indicators
+        stoch_fast = ta.STOCHF(dataframe, 5, 3, 0, 3, 0)
+        dataframe['fastk'] = stoch_fast['fastk']
 
-        # Get available parameters
-        available_indicators = set()
-        available_info_timeframes = set()
-        available_periods = set()
-
-        run_mode = self.dp.runmode.value
-        if run_mode in ("backtest", "live", "dry_run"):  # for these run mode shoud add only available parameters
-            for condition_idx in range(BUY_MAX_CONDITIONS):
-                indicator, fperiod, speriod = self.get_hyperopt_parameters("buy", condition_idx)
-                available_indicators.add(indicator)
-                available_info_timeframes.add(BUY_TIMEFRAMES[condition_idx])
-                available_periods.add(PERIODS[fperiod])
-                available_periods.add(PERIODS[speriod])
-            for condition_idx in range(SELL_MAX_CONDITIONS):
-                indicator, fperiod, speriod = self.get_hyperopt_parameters("sell", condition_idx)
-                available_indicators.add(indicator)
-                available_info_timeframes.add(SELL_TIMEFRAMES[condition_idx])
-                available_periods.add(PERIODS[fperiod])
-                available_periods.add(PERIODS[speriod])
-        else:
-            available_indicators = INDICATORS
-            available_info_timeframes = INFO_TIMEFRAMES
-            available_periods = PERIODS
-
-        # apply info timeframe indicator
-        for info_timeframe in available_info_timeframes:
-            info_dataframe = self.dp.get_pair_dataframe(pair=metadata["pair"], timeframe=info_timeframe, candle_type="futures")
-            for indicator in available_indicators:
-                for period in available_periods:
-                    apply_indicator(info_dataframe, f"{indicator}_{period}", indicator, period)
-            dataframe = merge_informative_pair(dataframe, info_dataframe, self.timeframe, info_timeframe, ffill=True)
-
-        # apply base timeframe indicator
-        for indicator in available_indicators:
-            for period in available_periods:
-                apply_indicator(dataframe, f"{indicator}_{period}_{BASE_TIMEFRAME}", indicator, period)
-
-        # print(list(dataframe.keys()))
+        dataframe['cci'] = ta.CCI(dataframe, timeperiod=20)
 
         return dataframe
-
-    ########################### Strategy Logic ###########################
-    def get_hyperopt_parameters(self, trend: str, condition_idx: int):
-        k_1, k_2, k_3 = get_hyperopt_parameter_keys(trend, condition_idx)
-        indicator = getattr(self, k_1).value
-        fperiod = getattr(self, k_2).value
-        speriod = getattr(self, k_3).value
-        return indicator, fperiod, speriod
-
-    def get_indicators_pair(self, trend: str, condition_idx: int) -> tuple[str, str, str]:
-        indicator, fperiod, speriod = self.get_hyperopt_parameters(trend, condition_idx)
-
-        if fperiod == speriod:
-            return None, None, None
-
-        if trend == "sell":
-            operator = "CB" if condition_idx == 0 else "<"
-            main_indicator = f"{indicator}_{PERIODS[fperiod]}_{SELL_TIMEFRAMES[condition_idx]}"
-            crossed_indicator = f"{indicator}_{PERIODS[speriod]}_{SELL_TIMEFRAMES[condition_idx]}"
-        else:
-            operator = "CA" if condition_idx == 0 else ">"
-            main_indicator = f"{indicator}_{PERIODS[fperiod]}_{BUY_TIMEFRAMES[condition_idx]}"
-            crossed_indicator = f"{indicator}_{PERIODS[speriod]}_{BUY_TIMEFRAMES[condition_idx]}"
-
-        return main_indicator, crossed_indicator, operator
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        trend = "buy"
-        conditions = list()
-
-        # BTC Condition TODO: Add crsi_1h
-        for btc_timframe in BTC_TIMEFRAMES:
-            conditions.append(dataframe[f"btc_not_downtrend_{btc_timframe}"] == True)
-
-        for condition_idx in range(BUY_MAX_CONDITIONS):
-            main_indicator, crossed_indicator, operator = self.get_indicators_pair(trend, condition_idx)
-            if not operator:
-                continue
-            condition, dataframe = apply_operator(dataframe, main_indicator, crossed_indicator, operator)
-            conditions.append(condition)
-
+        conditions = []
+        dataframe.loc[:, 'enter_tag'] = ''
+        buy_1 = (
+                (dataframe['rsi_slow'] < dataframe['rsi_slow'].shift(1)) &
+                (dataframe['rsi_fast'] < self.buy_rsi_fast_32.value) &
+                (dataframe['rsi'] > self.buy_rsi_32.value) &
+                (dataframe['close'] < dataframe['sma_15'] * self.buy_sma15_32.value) &
+                (dataframe['cti'] < self.buy_cti_32.value)
+        )
+        conditions.append(buy_1)
+        dataframe.loc[buy_1, 'enter_tag'] += 'buy_1'
         if conditions:
-            dataframe.loc[:, SignalType.ENTER_LONG.value] = reduce(lambda x, y: x & y, conditions)
-
+            dataframe.loc[
+                reduce(lambda x, y: x | y, conditions),
+                'enter_long'] = 1
         return dataframe
 
+    def custom_exit(self, pair: str, trade: 'Trade', current_time: 'datetime', current_rate: float,
+                    current_profit: float, **kwargs):
+        dataframe, _ = self.dp.get_analyzed_dataframe(pair=pair, timeframe=self.timeframe)
+        current_candle = dataframe.iloc[-1].squeeze()
+
+        if current_profit > 0:
+            if current_candle["fastk"] > self.sell_fastx.value:
+                return "fastk_profit_sell"
+
+            if current_candle["cci"] > self.sell_cci.value:
+                return "cci_profit_sell"
+
+        if current_candle["high"] >= trade.open_rate:
+            if current_candle["cci"] > self.sell_cci.value:
+                return "cci_sell"
+
+        if current_profit > self.sell_loss_cci_profit.value:
+            if current_candle["cci"] > self.sell_loss_cci.value:
+                return "cci_loss_sell"
+
+        return None
+
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        trend = "sell"
-        conditions = list()
-
-        # BTC Condition TODO: Add crsi_1h
-        for btc_timframe in BTC_TIMEFRAMES:
-            conditions.append(dataframe[f"btc_not_downtrend_{btc_timframe}"] == False)
-
-        for condition_idx in range(BUY_MAX_CONDITIONS):
-            main_indicator, crossed_indicator, operator = self.get_indicators_pair(trend, condition_idx)
-            if not operator:
-                continue
-            if operator:
-                condition, dataframe = apply_operator(dataframe, main_indicator, crossed_indicator, operator)
-                conditions.append(condition)
-
-        if conditions:
-            dataframe.loc[:, SignalType.EXIT_LONG.value] = reduce(lambda x, y: x & y, conditions)
-
+        dataframe.loc[(), ['exit_long', 'exit_tag']] = (0, 'long_out')
         return dataframe
