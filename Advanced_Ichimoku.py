@@ -197,7 +197,7 @@ class BelieveInCoin(IStrategy):
     process_only_new_candles = True
 
     # These values can be overridden in the "ask_strategy" section in the config.
-    use_sell_signal = True
+    use_exit_signal = True
     exit_profit_only = False
     ignore_roi_if_buy_signal = True
 
