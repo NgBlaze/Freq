@@ -16,7 +16,6 @@ from typing import Optional
 
 class ichiV1(IStrategy):
 
-    # NOTE: settings as of the 25th july 21
     # Buy hyperspace params:
     buy_params = {
         "buy_trend_above_senkou_level": 1,
@@ -94,6 +93,7 @@ class ichiV1(IStrategy):
                  
         entry_tag = ''
         max_leverage = 20.0
+        return max_leverage 
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
 
