@@ -33,14 +33,14 @@ class ichiV1(IStrategy):
 
     # ROI table:
     minimal_roi = {
-        "0": 0.059,
-        "10": 0.037,
-        "41": 0.012,
+        "0": 0.159,
+        "10": 0.37,
+        "41": 0.12,
         "114": 0
     }
 
     # Stoploss:
-    stoploss = -0.275
+    stoploss = -0.60
 
     # Optimal timeframe for the strategy
     timeframe = '5m'
@@ -86,6 +86,13 @@ class ichiV1(IStrategy):
             }
         }
     }
+
+    def leverage(self, pair: str, current_time: datetime, current_rate: float,
+                 proposed_leverage: float, max_leverage: float, entry_tag: Optional[str],
+                 side: str, **kwargs) -> float:
+                 
+        entry_tag = ''
+        max_leverage = 20.0
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
 
