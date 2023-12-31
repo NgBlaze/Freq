@@ -221,3 +221,6 @@ class ichiV1(IStrategy):
                 'sell'] = 1
 
         return dataframe
+
+
+#coneee
